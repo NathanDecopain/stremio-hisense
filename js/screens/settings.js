@@ -102,29 +102,72 @@ function SettingsScreen() {
   return screen;
 }
 
-// Registers the app as a VIDAA launcher app, then asks the launcher to refresh the way
-// the VIDAA store does. This firmware's signature is
+// VIDAA launcher install. This firmware's signature is
 // (appId, appName, thumbnail, iconSmall, iconBig, appUrl, callback).
-function installToLauncher() {
-  const appUrl = location.href.replace(/[#?].*$/, '').replace(/index\.html$/, '');
-  const icon = appUrl + 'icon.png';
-  const appId = 'stremio-hisense-port';
-  const done = (status) => {
-    devlog('installApp status', status, appUrl);
+const Launcher = (function () {
+  const APP_ID = 'stremio-hisense-port';
+  // Our own earlier installs: the same id, or an address of this app (the PC dev server or
+  // the GitHub Pages build). Matching by address means an official Stremio app from the
+  // VIDAA store is never touched.
+  const OURS = /:8000\/app\/|stremio-hisense/i;
+
+  function installed() {
+    try { return JSON.parse(window.Hisense_getInstalledApps(() => {})).AppInfo || []; } catch (e) { return []; }
+  }
+
+  function ours() {
+    return installed().filter((a) => !a.PreInstall && a.AppId && a.AppId !== '-1' &&
+      (a.AppId === APP_ID || OURS.test(a.URL || a.StartCommand || '')));
+  }
+
+  // Calls back when the TV answers or after 3s, whichever comes first.
+  function withTimeout(start, cb) {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; cb(v); } };
+    try { start(finish); } catch (e) { finish({ error: e.message }); return; }
+    setTimeout(() => finish('no callback'), 3000);
+  }
+
+  function refresh() {
     try {
       (window.omi_platform || window.opera_omi).sendPlatformMessage(JSON.stringify({
         type: 'APPMessage', MsgType: 'appControl', action: 'updateAppState', source: 'browser', startAppType: 2,
-        param: { event: 'AllAppsUpdate', SubModuleName: 'AllApps', startFrom: '', appInfo: appId }
+        param: { event: 'AllAppsUpdate', SubModuleName: 'AllApps', startFrom: '', appInfo: APP_ID }
       }));
     } catch (e) { devlog('launcher refresh failed', e.message); }
-    toast('Stremio was added to your TV’s apps. If it doesn’t show, restart the TV.', 7000);
-  };
-  try {
-    let called = false;
-    window.Hisense_installApp(appId, 'Stremio', icon, icon, icon, appUrl, (status) => { called = true; done(status); });
-    setTimeout(() => { if (!called) done('no callback'); }, 3000);
-  } catch (e) {
-    devlog('installApp threw', e.message);
-    toast('Install failed: ' + e.message, 6000);
   }
+
+  return {
+    available() { return typeof window.Hisense_installApp === 'function'; },
+
+    // Removes every earlier install of this app, then installs `appUrl` fresh.
+    install(appUrl, onDone) {
+      const old = ours();
+      devlog('launcher: removing', old.length, 'old install(s)', old.map((a) => a.URL));
+      const removeNext = () => {
+        const a = old.shift();
+        if (!a) return installNew();
+        withTimeout((cb) => window.Hisense_uninstallApp(a.AppId, cb), (r) => { devlog('uninstall', a.AppId, r); removeNext(); });
+      };
+      const installNew = () => {
+        const icon = appUrl + 'icon.png';
+        withTimeout((cb) => window.Hisense_installApp(APP_ID, 'Stremio', icon, icon, icon, appUrl, cb), (r) => {
+          refresh();
+          const entry = installed().filter((x) => x.AppId === APP_ID)[0];
+          devlog('install result', r, entry && entry.URL);
+          onDone(!!entry && entry.URL === appUrl);
+        });
+      };
+      removeNext();
+    }
+  };
+})();
+
+function installToLauncher() {
+  const appUrl = location.href.replace(/[#?].*$/, '').replace(/index\.html$/, '');
+  toast('Installing...', 6000);
+  Launcher.install(appUrl, (ok) => {
+    toast(ok ? 'Stremio is on your TV\u2019s home screen (older icons removed). Restart the TV if it doesn\u2019t show.'
+      : 'The TV didn\u2019t confirm the install. Restart the TV and check the app list.', 8000);
+  });
 }
