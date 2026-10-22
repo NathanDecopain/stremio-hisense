@@ -117,19 +117,44 @@ function toast(text, ms) {
   toast.timer = setTimeout(() => { el.className = ''; }, ms || 3000);
 }
 
-// When served by the dev server on the PC, ship errors and logs back to it,
-// because there is no way to open devtools on the TV.
+// Ship errors and logs to the dev server on the PC, because there is no way to open
+// devtools on the TV. Served from the dev server, logs go by XHR. Served from GitHub
+// Pages, logging is off unless the URL has ?log=<host:port>; then lines go out as image
+// requests, since an https page may load http images but not make http XHRs.
 const devlog = (function () {
-  const enabled = location.port === '8000';
+  const local = location.port === '8000';
+  const beaconMatch = /[?&]log=([\w.\-]+(?::\d+)?)/.exec(location.search);
+  const beaconHost = !local && beaconMatch ? beaconMatch[1] : null;
+  const enabled = local || !!beaconHost;
   const lines = [];
+  let sent = 0, dropped = 0;
   const flush = debounce(() => {
+    if (beaconHost) {
+      // Send only lines not sent yet, in URL-sized batches.
+      const fresh = lines.slice(Math.max(0, lines.length - (lines._added - sent)));
+      sent = lines._added;
+      let batch = [];
+      const fire = () => {
+        if (!batch.length) return;
+        const img = new Image();
+        img.src = 'http://' + beaconHost + '/beacon?d=' + encodeURIComponent(JSON.stringify(batch)) + '&r=' + Math.random();
+        batch = [];
+      };
+      fresh.forEach((l) => {
+        if (encodeURIComponent(JSON.stringify(batch.concat([l]))).length > 1800) fire();
+        batch.push(l.slice(0, 600));
+      });
+      fire();
+      return;
+    }
     try {
       const x = new XMLHttpRequest();
       x.open('POST', '/report/app-log', true);
       x.setRequestHeader('Content-Type', 'application/json');
-      x.send(JSON.stringify({ ua: navigator.userAgent, lines: lines }));
+      x.send(JSON.stringify({ ua: navigator.userAgent, lines: lines, dropped }));
     } catch (e) {}
   }, 1000);
+  lines._added = 0;
   function log() {
     const msg = Array.prototype.map.call(arguments, (a) => {
       if (a instanceof Error) return a.message + (a.stack ? '\n' + a.stack : '');
@@ -139,7 +164,8 @@ const devlog = (function () {
     if (window.console) console.log(msg);
     if (!enabled) return;
     lines.push(new Date().toISOString().slice(11, 19) + ' ' + msg);
-    if (lines.length > 300) lines.shift();
+    lines._added++;
+    if (lines.length > 300) { lines.shift(); dropped++; }
     flush();
   }
   if (enabled) {
